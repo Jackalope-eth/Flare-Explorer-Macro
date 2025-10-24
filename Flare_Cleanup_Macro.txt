@@ -1,0 +1,173 @@
+Option Explicit
+
+Sub Flare_Cleanup_Macro()
+    Dim oDoc As Object, oSheet As Object
+    Dim lastRow As Long, lastCol As Long
+    Dim i As Long, j As Long
+    Dim targetAddress As String
+    Dim fromCol As Long, toCol As Long, valueCol As Long, feeCol As Long, dateCol As Long
+    Dim runningBalanceCol As Long
+    Dim balance As Double
+    Dim fromAddr As String, toAddr As String
+    Dim amtVal As Double, feeVal As Double
+    Dim cell As Object, isInbound As Boolean
+    
+    Const WEI_IN_FLR As Double = 1000000000000000000# ' 1e18 wei = 1 FLR
+    
+    ' Prompt user for address
+    targetAddress = InputBox("Enter the target address (case insensitive):", "Target Address")
+    If Trim(targetAddress) = "" Then
+        MsgBox "No target address entered. Exiting macro.", 16, "Error"
+        Exit Sub
+    End If
+    targetAddress = LCase(Trim(targetAddress))
+    
+    oDoc = ThisComponent
+    oSheet = oDoc.Sheets(0)
+    
+    ' Find last row
+    lastRow = 1
+    While oSheet.getCellByPosition(0, lastRow).String <> ""
+        lastRow = lastRow + 1
+    Wend
+    lastRow = lastRow - 1
+    
+    ' Find last column
+    lastCol = 0
+    While Trim(oSheet.getCellByPosition(lastCol, 0).String) <> ""
+        lastCol = lastCol + 1
+    Wend
+    
+    ' Find required columns
+    fromCol = FindColumn(oSheet, "FromAddress", lastCol)
+    toCol = FindColumn(oSheet, "ToAddress", lastCol)
+    valueCol = FindColumn(oSheet, "Value", lastCol)
+    feeCol = FindColumn(oSheet, "Fee", lastCol)
+    dateCol = FindColumn(oSheet, "TxDateOpeningPrice", lastCol)
+    
+    If fromCol = -1 Or toCol = -1 Or valueCol = -1 Or feeCol = -1 Or dateCol = -1 Then
+        MsgBox "One or more required columns (FromAddress, ToAddress, Value, Fee, Date) not found.", 16, "Error"
+        Exit Sub
+    End If
+    
+    ' Add Running Balance column if missing
+    runningBalanceCol = FindColumn(oSheet, "Running Balance", lastCol)
+    If runningBalanceCol = -1 Then
+        runningBalanceCol = lastCol
+        oSheet.getCellByPosition(runningBalanceCol, 0).String = "Running Balance"
+        lastCol = lastCol + 1
+    End If
+    
+    ' Define number format (8 decimals)
+    Dim oFormats As Object, oFormatNum As Long
+    Dim oLocale As New com.sun.star.lang.Locale
+    oLocale.Language = "en"
+    oLocale.Country = "US"
+    oFormats = oDoc.getNumberFormats()
+    oFormatNum = oFormats.queryKey("#,##0.00000000", oLocale, True)
+    If oFormatNum = -1 Then
+        oFormatNum = oFormats.addNew("#,##0.00000000", oLocale)
+    End If
+    
+    balance = 0
+    
+    ' Main loop
+    For i = 1 To lastRow
+        Dim valCell As Object, feeCell As Object
+        fromAddr = LCase(Trim(oSheet.getCellByPosition(fromCol, i).String))
+        toAddr = LCase(Trim(oSheet.getCellByPosition(toCol, i).String))
+        valCell = oSheet.getCellByPosition(valueCol, i)
+        feeCell = oSheet.getCellByPosition(feeCol, i)
+        
+        ' Convert from wei to FLR
+        If IsNumeric(valCell.Value) Then
+            amtVal = valCell.Value / WEI_IN_FLR
+        Else
+            amtVal = CDbl(Val(valCell.String)) / WEI_IN_FLR
+        End If
+        
+        If IsNumeric(feeCell.Value) Then
+            feeVal = feeCell.Value / WEI_IN_FLR
+        Else
+            feeVal = CDbl(Val(feeCell.String)) / WEI_IN_FLR
+        End If
+        
+        ' Write converted values back to sheet
+        valCell.Value = amtVal
+        feeCell.Value = feeVal
+        valCell.NumberFormat = oFormatNum
+        feeCell.NumberFormat = oFormatNum
+        
+        ' Calculate running balance
+        isInbound = False
+        If fromAddr = targetAddress Then
+            balance = balance - amtVal - feeVal
+        ElseIf toAddr = targetAddress Then
+            balance = balance + amtVal
+            isInbound = True
+        End If
+        
+        ' Update balance cell
+        cell = oSheet.getCellByPosition(runningBalanceCol, i)
+        cell.NumberFormat = oFormatNum
+        cell.Value = balance
+        
+        ' Color the row
+        Dim col As Long
+        For col = 0 To lastCol - 1
+            cell = oSheet.getCellByPosition(col, i)
+            If isInbound Then
+                cell.CellBackColor = RGB(204, 255, 204) ' Light green
+            ElseIf fromAddr = targetAddress Or toAddr = targetAddress Then
+                cell.CellBackColor = RGB(255, 204, 204) ' Light red
+            Else
+                cell.CellBackColor = RGB(255, 255, 255)
+            End If
+        Next col
+    Next i
+    
+    ' Format headers and borders
+    Dim borderLine As New com.sun.star.table.BorderLine
+    borderLine.OuterLineWidth = 50
+    Dim tableBorder As New com.sun.star.table.TableBorder
+    With tableBorder
+        .TopLine = borderLine
+        .BottomLine = borderLine
+        .LeftLine = borderLine
+        .RightLine = borderLine
+        .IsTopLineValid = True
+        .IsBottomLineValid = True
+        .IsLeftLineValid = True
+        .IsRightLineValid = True
+    End With
+    
+    ' Header formatting
+    For i = 0 To lastCol - 1
+        cell = oSheet.getCellByPosition(i, 0)
+        cell.HoriJustify = com.sun.star.table.CellHoriJustify.CENTER
+        cell.CharWeight = com.sun.star.awt.FontWeight.BOLD
+        cell.TableBorder = tableBorder
+    Next i
+    
+    ' Apply borders to all data cells
+    For i = 0 To lastRow
+        For j = 0 To lastCol - 1
+            oSheet.getCellByPosition(j, i).TableBorder = tableBorder
+        Next j
+    Next i
+    
+    MsgBox "FLR values converted from wei and running balance calculated successfully.", 64, "Done"
+End Sub
+
+
+' Helper: find column by header name
+Function FindColumn(oSheet As Object, colName As String, maxCols As Long) As Long
+    Dim i As Long
+    FindColumn = -1
+    For i = 0 To maxCols - 1
+        If Trim(oSheet.getCellByPosition(i, 0).String) = colName Then
+            FindColumn = i
+            Exit Function
+        End If
+    Next i
+End Function
